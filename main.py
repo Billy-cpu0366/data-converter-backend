@@ -19,7 +19,7 @@ app = FastAPI()
 
 # --- Startup Check ---
 if not API_KEY:
-    raise SystemExit("CRITICAL ERROR: OPENROUTER_API_KEY environment variable not set. The application cannot start.")
+    raise SystemExit("CRITICAL ERROR: OPENROOUTER_API_KEY environment variable not set. The application cannot start.")
 
 origins = [
     "http://localhost:3000",
@@ -199,8 +199,7 @@ async def convert_data(file: UploadFile = File(...)):
 **核心指令:**
 
 1.  **绝对保真**:
-    *   **题目 (`raw_question`)**: 必须与原文100%一致, 包括所有的空格、换行符 (`
-`)、制表符 (`	`)、代码缩进和特殊字符. **严禁进行任何形式的转义或格式修改.**
+    *   **题目 (`raw_question`)**: 必须与原文100%一致, 包括所有的空格、换行符 (`\n`)、制表符 (`\t`)、代码缩进和特殊字符. **严禁进行任何形式的转义或格式修改.**
     *   **选项 (`raw_options`)**: 同样必须保持绝对原文.
 
 2.  **答案提取与标准化**:
@@ -211,7 +210,7 @@ async def convert_data(file: UploadFile = File(...)):
 3.  **严格的JSON输出**:
     *   只输出一个顶级的JSON对象.
     *   JSON对象必须包含一个名为 `questions` 的键, 其值为一个数组.
-    *   如果文本中没有找到任何有效的题目, 返回 `{"questions": []}`.
+    *   如果文本中没有找到任何有效的题目, 返回 `{\"questions\": []}`.
 
 **处理范例:**
 
@@ -226,8 +225,7 @@ async def convert_data(file: UploadFile = File(...)):
     void main()
     {
       char a='9',b='8',c='7';
-      printf("%c
-", fun(fun(a,b), fun(b,c)));
+      printf("%c\n", fun(fun(a,b), fun(b,c)));
     }
     程序运行后的输出结果是( ).
     A. 9
@@ -242,18 +240,7 @@ async def convert_data(file: UploadFile = File(...)):
     {
       "questions": [
         {
-          "raw_question": "1. 有以下程序：
-char fun(char x, char y)
-{
-  if(x)
-    return y;
-}
-void main()
-{
-  char a='9',b='8',c='7';
-  printf(\"%c\\n\", fun(fun(a,b), fun(b,c)));
-}
-程序运行后的输出结果是( ).",
+          "raw_question": "1. 有以下程序：\nchar fun(char x, char y)\n{\n  if(x)\n    return y;\n}\nvoid main()\n{\n  char a='9',b='8',c='7';\n  printf(\"\\\"%c\\\\n\\\"", fun(fun(a,b), fun(b,c)));\n}\n程序运行后的输出结果是( ).",
           "raw_options": [
             "9",
             "8",
