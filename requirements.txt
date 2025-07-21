@@ -3,3 +3,9 @@ uvicorn
 openai
 pandas
 python-multipart
+python-docx
+openpyxl
+openpyxl
+openpyxl
+openpyxl
+openpyxl

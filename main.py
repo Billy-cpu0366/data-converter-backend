@@ -1,26 +1,25 @@
-
-
-from fastapi import FastAPI, File, UploadFile, Form, Request
+from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError
 import os
 import json
 import pandas as pd
 from io import BytesIO
 import re
+import docx
 
 # --- Configuration ---
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 MODEL_NAME = "openai/gpt-4.1-mini"
 
-# Define chunking parameters
-MAX_CHUNK_SIZE_CHARS = 10000  # Max characters per chunk (adjust based on model token limits)
-CHUNK_OVERLAP_CHARS = 500     # Overlap to ensure context is not lost at boundaries
-
 # --- FastAPI App Initialization ---
 app = FastAPI()
+
+# --- Startup Check ---
+if not API_KEY:
+    raise SystemExit("CRITICAL ERROR: OPENROUTER_API_KEY environment variable not set. The application cannot start.")
 
 origins = [
     "http://localhost:3000",
@@ -36,9 +35,6 @@ app.add_middleware(
 )
 
 # --- OpenAI Client Initialization ---
-if not API_KEY:
-    print("CRITICAL ERROR: OPENROUTER_API_KEY environment variable not set.")
-
 client = OpenAI(
     api_key=API_KEY,
     base_url=OPENROUTER_API_BASE,
@@ -46,7 +42,18 @@ client = OpenAI(
 
 # --- Helper Functions ---
 
+def process_docx_file(file_content: bytes) -> str:
+    """Extracts text from a .docx file."""
+    try:
+        doc = docx.Document(BytesIO(file_content))
+        all_text = [p.text for p in doc.paragraphs]
+        return "\n".join(all_text)
+    except Exception as e:
+        print(f"Error processing DOCX file: {e}")
+        raise ValueError(f"Failed to process DOCX file: {e}")
+
 def decode_text(raw_data: bytes) -> str:
+    """Tries to decode raw bytes using a list of common encodings."""
     encodings_to_try = ['utf-8', 'gbk', 'gb2312', 'latin-1']
     for encoding in encodings_to_try:
         try:
@@ -56,13 +63,12 @@ def decode_text(raw_data: bytes) -> str:
     return ""
 
 def process_excel_file(file_content: bytes) -> str:
+    """Extracts text from all sheets of an Excel file and formats it as CSV."""
     try:
-        # Read all sheets from the Excel file
         xls = pd.ExcelFile(BytesIO(file_content))
         all_sheets_text = []
         for sheet_name in xls.sheet_names:
             df = pd.read_excel(xls, sheet_name=sheet_name)
-            # Convert each sheet to CSV string, then append
             all_sheets_text.append(f"\n--- Sheet: {sheet_name} ---\n")
             all_sheets_text.append(df.to_csv(index=False))
         return "\n".join(all_sheets_text)
@@ -70,264 +76,230 @@ def process_excel_file(file_content: bytes) -> str:
         print(f"Error processing Excel file: {e}")
         raise ValueError(f"Failed to process Excel file: {e}")
 
-def parse_ai_json_response(ai_response_str: str):
+def parse_ai_json_response(ai_response_str: str) -> list:
+    """
+    Parses the JSON response from the AI. It now expects the answer to be a letter (A, B, C, D)
+    and converts it to a zero-based index. It no longer performs any escaping/decoding.
+    """
     try:
-        # Try to extract JSON from markdown code block first
-        json_match = re.search(r'```json\n(.*)\n```', ai_response_str, re.DOTALL)
-        if json_match:
-            json_content = json_match.group(1)
-        else:
-            json_content = ai_response_str # Assume it's pure JSON if no markdown block
-        
-        parsed_json = json.loads(json_content)
-        
-        converted_data = None
-        # Try to find a list within the top-level values of the JSON
-        if isinstance(parsed_json, dict):
-            for value in parsed_json.values():
-                if isinstance(value, list):
-                    converted_data = value
-                    break
-        
-        # If no list found, try to use the whole parsed_json if it's a list
-        if converted_data is None and isinstance(parsed_json, list):
-            converted_data = parsed_json
+        json_start_index = ai_response_str.find('{')
+        if json_start_index == -1:
+            print(f"Warning: No JSON object found in AI response. Raw: {ai_response_str[:500]}...")
+            return []
 
-        if converted_data is None:
-            # Fallback: if AI returns a single object, wrap it in a list
-            if isinstance(parsed_json, dict):
-                converted_data = [parsed_json]
+        parsed_json = json.loads(ai_response_str[json_start_index:])
+
+        if not isinstance(parsed_json, dict) or "questions" not in parsed_json:
+            print(f"Warning: AI response JSON did not have the expected 'questions' key. Raw: {ai_response_str[:500]}...")
+            return []
+
+        raw_questions = parsed_json.get("questions", [])
+        if not isinstance(raw_questions, list):
+            print(f"Warning: 'questions' in AI response is not a list. Raw: {ai_response_str[:500]}...")
+            return []
+
+        transformed_questions = []
+        for q in raw_questions:
+            if not isinstance(q, dict):
+                print(f"Warning: Question item is not a dictionary: {q}")
+                continue
+
+            raw_question = q.get("raw_question", "")
+            raw_options = q.get("raw_options", [])
+            raw_answer = q.get("raw_answer", "").strip().upper()
+
+            if not raw_question or not isinstance(raw_options, list) or not raw_answer:
+                print(f"Warning: Missing required fields (raw_question, raw_options, raw_answer) in question: {q}")
+                continue
+
+            # Convert answer letter ('A', 'B', 'C', 'D') to a zero-based index.
+            correct_option_index = -1
+            if raw_answer in "ABCD":
+                correct_option_index = "ABCD".find(raw_answer)
             else:
-                raise ValueError("AI did not return a valid JSON array or object that could be converted.")
-        
-        return converted_data
+                print(f"Warning: Invalid raw_answer '{raw_answer}' received from AI for question '{raw_question}'. Expected 'A', 'B', 'C', or 'D'.")
+
+            transformed_questions.append({
+                "question": raw_question,
+                "options": raw_options,
+                "correctOptionIndex": correct_option_index
+            })
+        return transformed_questions
 
     except json.JSONDecodeError as e:
-        raise ValueError(f"AI returned invalid JSON: {e}. Raw AI response: {ai_response_str[:500]}...")
-    except ValueError as e:
-        raise ValueError(f"AI response could not be converted to expected format: {e}. Raw AI response: {ai_response_str[:500]}...")
+        print(f"Error: AI returned invalid JSON: {e}. Raw: {ai_response_str[:500]}...")
+        return []
+    except Exception as e:
+        print(f"An unexpected error occurred in parse_ai_json_response: {e}. Raw: {ai_response_str[:500]}...")
+        return []
 
-def generate_quiz_html(quiz_data: list) -> str:
-    processed_quiz_data = []
-    for question_item in quiz_data:
-        processed_question = question_item.copy()
-        if 'options' in processed_question and isinstance(processed_question['options'], dict):
-            processed_question['options'] = list(processed_question['options'].values())
-        processed_quiz_data.append(processed_question)
+def generate_quiz_html(quiz_data: list, mode: str) -> str:
+    """Generates the final HTML page using the template file."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    template_path = os.path.join(script_dir, 'templates', 'index.html')
 
-    quiz_data_json = json.dumps(processed_quiz_data, ensure_ascii=False)
+    try:
+        with open(template_path, "r", encoding="utf-8") as f:
+            html_template = f.read()
+    except FileNotFoundError:
+        raise ValueError("The template file 'templates/index.html' was not found.")
 
-    html_template = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Practice Quiz</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
-        .container { max-width: 800px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { text-align: center; color: #0056b3; margin-bottom: 30px; }
-        .question-card { background-color: #e9f5ff; border: 1px solid #cce7ff; border-radius: 6px; padding: 20px; margin-bottom: 20px; }
-        .question-text { font-size: 1.2em; margin-bottom: 15px; line-height: 1.5; }
-        .options label { display: block; margin-bottom: 10px; cursor: pointer; font-size: 1.1em; }
-        .options input[type="radio"] { margin-right: 10px; }
-        .feedback { margin-top: 15px; font-weight: bold; }
-        .correct { color: green; }
-        .incorrect { color: red; }
-        .navigation-buttons { text-align: center; margin-top: 30px; }
-        .navigation-buttons button { background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 1em; margin: 0 10px; }
-        .navigation-buttons button:hover { background-color: #0056b3; }
-        .navigation-buttons button:disabled { background-color: #cccccc; cursor: not-allowed; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Practice Quiz</h1>
-        <div id="quiz-container"></div>
-        <div class="navigation-buttons">
-            <button id="prev-btn" disabled>Previous</button>
-            <button id="next-btn">Next</button>
-        </div>
-    </div>
-
-    <script>
-        const quizDataElement = document.createElement('div');
-        quizDataElement.style.display = 'none';
-        quizDataElement.setAttribute('id', 'quiz-data');
-        quizDataElement.setAttribute('data-quiz', `{quiz_data_placeholder}`);
-        document.body.appendChild(quizDataElement);
-
-        let currentQuestionIndex = 0;
-        let questions = [];
-
-        try {
-            const rawQuizData = document.getElementById('quiz-data').getAttribute('data-quiz');
-            questions = JSON.parse(rawQuizData);
-        } catch (e) {
-            console.error("Error parsing quiz data:", e);
-            document.getElementById("quiz-container").innerHTML = "<p style=\"color: red;\">Error loading quiz data. Please check the data format.</p>";
-        }
-
-        function indexToLetter(index) {
-            return String.fromCharCode(65 + index); // 65 is ASCII for 'A'
-        }
-
-        function displayQuestion() {
-            if (questions.length === 0) {
-                document.getElementById("quiz-container").innerHTML = "<p>No questions available.</p>";
-                return;
-            }
-            const question = questions[currentQuestionIndex];
-            const quizContainer = document.getElementById("quiz-container");
-            quizContainer.innerHTML = `
-                <div class="question-card">
-                    <div class="question-text">${currentQuestionIndex + 1}. ${question.question}</div>
-                    <div class="options">
-                        ${question.options.map((option, index) => `
-                            <label>
-                                <input type="radio" name="q${currentQuestionIndex}" value="${option}" onchange="checkAnswer()">
-                                ${indexToLetter(index)}. ${option}
-                            </label>
-                        `).join('')}
-                    </div>
-                    <div class="feedback" id="feedback-${currentQuestionIndex}"></div>
-                </div>
-            `;
-            updateNavigationButtons();
-        }
-
-        function checkAnswer() {
-            const question = questions[currentQuestionIndex];
-            const selectedOption = document.querySelector(`input[name="q${currentQuestionIndex}"]:checked`);
-            const feedbackDiv = document.getElementById(`feedback-${currentQuestionIndex}`);
-
-            if (selectedOption) {
-                const correctOptionIndex = question.options.indexOf(question.answer);
-                const correctAnswerLetter = indexToLetter(correctOptionIndex);
-
-                if (selectedOption.value === question.answer) {
-                    feedbackDiv.className = 'feedback correct';
-                    feedbackDiv.textContent = 'Correct!';
-                } else {
-                    feedbackDiv.className = 'feedback incorrect';
-                    feedbackDiv.textContent = `Incorrect. The correct answer is: ${correctAnswerLetter}. ${question.answer}`;
-                }
-            } else {
-                feedbackDiv.className = 'feedback';
-                feedbackDiv.textContent = '';
-            }
-        }
-
-        function updateNavigationButtons() {
-            document.getElementById("prev-btn").disabled = currentQuestionIndex === 0;
-            document.getElementById("next-btn").disabled = currentQuestionIndex === questions.length - 1;
-        }
-
-        document.getElementById("next-btn").addEventListener("click", () => {
-            if (currentQuestionIndex < questions.length - 1) {
-                currentQuestionIndex++;
-                displayQuestion();
-            }
-        });
-
-        document.getElementById("prev-btn").addEventListener("click", () => {
-            if (currentQuestionIndex > 0) {
-                currentQuestionIndex--;
-                displayQuestion();
-            }
-        });
-
-        document.addEventListener("DOMContentLoaded", displayQuestion);
-    </script>
-</body>
-</html>
-"""
-    html_content = html_template.format(quiz_data_placeholder=quiz_data_json)
-    return html_content
+    json_data = json.dumps(quiz_data, ensure_ascii=False)
+    
+    # 将 JSON 数据注入到数据岛中
+    final_html = html_template.replace(
+        '/*__QUIZ_DATA_PLACEHOLDER__*/',
+        json_data
+    )
+    final_html = final_html.replace(
+        "const questionOrderMode = 'random'",
+        f"const questionOrderMode = '{mode}'"
+    )
+    
+    return final_html
 
 # --- API Endpoints ---
 
 @app.post("/generate-practice-page", response_class=HTMLResponse)
-async def generate_practice_page(quiz_data: list):
-    print("Received quiz_data:", quiz_data)
+async def generate_practice_page(request: Request):
+    data = await request.json()
+    quiz_data = data.get("quiz_data")
+    mode = data.get("mode", "random")
+
+    if not isinstance(quiz_data, list):
+        return JSONResponse(content={"error": f"Invalid quiz data format: expected a list, got {type(quiz_data).__name__}."}, status_code=400)
+
     try:
-        html_output = generate_quiz_html(quiz_data)
+        html_output = generate_quiz_html(quiz_data, mode)
         return HTMLResponse(content=html_output, media_type="text/html")
     except Exception as e:
+        print(f"Error generating practice page: {e}")
         return JSONResponse(content={"error": f"Failed to generate practice page: {str(e)}"}, status_code=500)
+
 @app.post("/convert")
 async def convert_data(file: UploadFile = File(...)):
-    if not API_KEY:
-        return JSONResponse(content={"error": "API Key is not configured on the server."}, status_code=500)
-
     raw_data = await file.read()
-    unstructured_data_text = ""
+    filename = file.filename.lower() if file.filename else ""
 
-    # Determine file type and process accordingly
-    if file.filename.endswith('.xlsx') or file.filename.endswith('.xls'):
-        try:
+    try:
+        if filename.endswith('.docx'):
+            unstructured_data_text = process_docx_file(raw_data)
+        elif filename.endswith(('.xlsx', '.xls')):
             unstructured_data_text = process_excel_file(raw_data)
-        except ValueError as e:
-            return JSONResponse(content={"error": str(e)}, status_code=400)
-    else:
-        # Assume it's a text-based file (txt, csv, etc.)
-        unstructured_data_text = decode_text(raw_data)
-        if not unstructured_data_text:
-            return JSONResponse(content={"error": "Could not decode file content. It might be a binary file or use an unsupported text encoding."}, status_code=400)
-
-    # --- Chunking and AI Call Loop ---
-    all_converted_items = []
-    start_index = 0
-    total_length = len(unstructured_data_text)
-
-    while start_index < total_length:
-        end_index = min(start_index + MAX_CHUNK_SIZE_CHARS, total_length)
-        chunk = unstructured_data_text[start_index:end_index]
-
-        # Adjust start_index for the next chunk with overlap
-        if end_index < total_length:
-            start_index = end_index - CHUNK_OVERLAP_CHARS
-            # Ensure start_index doesn't go negative
-            if start_index < 0: start_index = 0
         else:
-            start_index = total_length # End the loop
+            unstructured_data_text = decode_text(raw_data)
+            if not unstructured_data_text:
+                return JSONResponse(content={"error": "Could not decode file. It might be binary or use an unsupported encoding."}, status_code=400)
+    except ValueError as e:
+        return JSONResponse(content={"error": str(e)}, status_code=400)
 
-        # Create a clear, structured prompt for the AI for this chunk
-        system_prompt = """You are an expert quiz data extraction tool. Your task is to convert unstructured text into a structured JSON array of quiz questions. Each object in the array must contain 'question' (string), 'options' (an array of strings for choices), and 'answer' (string, the correct option). You must only return a valid JSON array. Do not include any markdown formatting like ```json or any explanatory text. If no quiz data is found in this chunk, return an empty JSON array []."""
-        user_prompt = f"""This is a part of a larger document. Please process the following text chunk:
+    system_prompt = """你是一个高度精确的题库提取机器人. 你的核心任务是从用户提供的文本中, 一字不差地提取出所有选择题, 并以稳定、纯净的JSON格式输出.
+
+**核心指令:**
+
+1.  **绝对保真**:
+    *   **题目 (`raw_question`)**: 必须与原文100%一致, 包括所有的空格、换行符 (`
+`)、制表符 (`	`)、代码缩进和特殊字符. **严禁进行任何形式的转义或格式修改.**
+    *   **选项 (`raw_options`)**: 同样必须保持绝对原文.
+
+2.  **答案提取与标准化**:
+    *   在题目文本中找到 `【答案】X` 这样的标记.
+    *   提取这个标记中的字母 `X`.
+    *   **答案 (`raw_answer`)**: 必须将提取到的字母标准化为单个大写字母: `A`, `B`, `C`, 或 `D`.
+
+3.  **严格的JSON输出**:
+    *   只输出一个顶级的JSON对象.
+    *   JSON对象必须包含一个名为 `questions` 的键, 其值为一个数组.
+    *   如果文本中没有找到任何有效的题目, 返回 `{"questions": []}`.
+
+**处理范例:**
+
+*   **如果原文是:**
+    ```
+    1. 有以下程序：
+    char fun(char x, char y)
+    {
+      if(x)
+        return y;
+    }
+    void main()
+    {
+      char a='9',b='8',c='7';
+      printf("%c
+", fun(fun(a,b), fun(b,c)));
+    }
+    程序运行后的输出结果是( ).
+    A. 9
+    B. 8
+    C. 7
+    D. 语法错误
+    【答案】B
+    ```
+
+*   **你必须输出:**
+    ```json
+    {
+      "questions": [
+        {
+          "raw_question": "1. 有以下程序：
+char fun(char x, char y)
+{
+  if(x)
+    return y;
+}
+void main()
+{
+  char a='9',b='8',c='7';
+  printf(\"%c\\n\", fun(fun(a,b), fun(b,c)));
+}
+程序运行后的输出结果是( ).",
+          "raw_options": [
+            "9",
+            "8",
+            "7",
+            "语法错误"
+          ],
+          "raw_answer": "B"
+        }
+      ]
+    }
+    ```
+"""
+
+    user_prompt = f"""Please process the following text and extract all quiz questions from it according to the specified JSON format:
 
 ---
-{chunk}
+{unstructured_data_text}
+---
+"""
 
-Based on the text above, please extract quiz questions, their options, and the correct answer. Ensure 'options' is an array of strings and 'answer' is one of the options."""
+    try:
+        completion = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"}
+        )
+        ai_response_str = completion.choices[0].message.content
+        converted_data = parse_ai_json_response(ai_response_str)
 
-        try:
-            completion = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.1,
-                response_format={"type": "json_object"}
-            )
-            ai_response_str = completion.choices[0].message.content
-            
-            # Parse the AI's JSON response for this chunk
-            chunk_converted_data = parse_ai_json_response(ai_response_str)
-            all_converted_items.extend(chunk_converted_data)
+    except APIConnectionError as e:
+        print(f"AI API Connection Error: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "无法连接到 AI 服务。请检查您的网络连接和代理设置。如果在中国大陆使用，请确保已正确配置全局代理。"}
+        )
+    except Exception as e:
+        print(f"An error occurred during the AI call: {type(e).__name__}: {e}")
+        return JSONResponse(content={"error": f"An error occurred while processing with AI: {str(e)}"}, status_code=500)
 
-        except Exception as e:
-            print(f"An error occurred during AI call for a chunk: {e}")
-            # Return an error response if any chunk fails
-            return JSONResponse(content={"error": f"An error occurred while processing a chunk with AI: {str(e)}. Raw AI response: {ai_response_str[:200] if 'ai_response_str' in locals() else ''}..."}, status_code=500)
-
-    # Return the final structured data to the frontend
     final_response = {
         "message": "Conversion successful!",
         "original_filename": file.filename,
-        "converted_data": all_converted_items
+        "converted_data": converted_data
     }
     return JSONResponse(content=final_response)
 
