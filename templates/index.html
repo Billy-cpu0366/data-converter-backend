@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>刷题练习</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .custom-scrollbar::-webkit-scrollbar { height: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #888; border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #555; }
+        .nav-btn { flex-shrink: 0; }
+        /* 新增样式：保留空白和换行 */
+        .whitespace-pre-wrap {
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans">
+    <div id="app-container" class="container mx-auto p-4 max-w-2xl">
+        <div id="quiz-view" class="bg-white rounded-lg shadow-lg p-6 transition-opacity duration-500">
+            <div class="mb-6 text-center">
+                <p id="progress-text" class="text-lg font-semibold text-gray-700">题目 1 / 100</p>
+            </div>
+            <div class="mb-6 min-h-[6rem]">
+                <p id="question-text" class="text-xl text-gray-800 leading-relaxed whitespace-pre-wrap"></p> <!-- 添加 whitespace-pre-wrap -->
+            </div>
+            <div id="options-container" class="space-y-4"></div>
+            <div class="mt-8 flex justify-between">
+                <button id="prev-btn" class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-2 px-6 rounded-lg transition-colors">上一题</button>
+                <button id="next-btn" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-6 rounded-lg transition-colors">下一题</button>
+            </div>
+            <div class="mt-4 text-center">
+                <button id="finish-btn" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-8 rounded-lg transition-colors">完成练习</button>
+            </div>
+        </div>
+        <div id="results-view" class="hidden bg-white rounded-lg shadow-lg p-8 text-center transition-opacity duration-500">
+            <h2 class="text-3xl font-bold text-gray-800 mb-4">练习完成!</h2>
+            <p id="score-text" class="text-2xl text-blue-600 mb-8">你的成绩: 85 / 100 (85%)</p>
+            <button id="restart-btn" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-10 rounded-lg transition-colors text-lg">重新开始</button>
+        </div>
+    </div>
+    <div id="nav-bar" class="fixed bottom-0 left-0 w-full bg-white shadow-t-lg p-2 custom-scrollbar overflow-x-auto whitespace-nowrap"></div>
+
+    <script type="application/json" id="quiz-data">
+        /*__QUIZ_DATA_PLACEHOLDER__*/
+    </script>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const quizView = document.getElementById('quiz-view');
+            const resultsView = document.getElementById('results-view');
+            const progressText = document.getElementById('progress-text');
+            const questionText = document.getElementById('question-text');
+            const optionsContainer = document.getElementById('options-container');
+            const prevBtn = document.getElementById('prev-btn');
+            const nextBtn = document.getElementById('next-btn');
+            const finishBtn = document.getElementById('finish-btn');
+            const scoreText = document.getElementById('score-text');
+            const restartBtn = document.getElementById('restart-btn');
+            const navBar = document.getElementById('nav-bar');
+
+            let questions = [];
+            let userProgress = [];
+            let shuffledIndices = [];
+            let currentQuestionIndex = 0;
+            const questionOrderMode = 'random'; // This will be replaced by the backend
+
+            function parseQuizData(jsonData) {
+                try {
+                    const parsed = JSON.parse(jsonData);
+                    if (!Array.isArray(parsed)) {
+                        console.error("Data is not an array:", parsed);
+                        return [];
+                    }
+                    
+                    // 更宽松的验证条件，确保C语言题目能显示
+                    return parsed.filter(q => {
+                        if (!q) return false;
+                        
+                        // 允许question为字符串或可以转为字符串的内容
+                        const hasQuestion = q.question !== null && q.question !== undefined;
+                        
+                        // 允许options为数组，即使为空也显示
+                        const hasOptions = Array.isArray(q.options);
+                        
+                        // 允许correctOptionIndex为数字或字符串数字
+                        const hasCorrectIndex = q.correctOptionIndex !== null && q.correctOptionIndex !== undefined;
+                        
+                        return hasQuestion && hasOptions && hasCorrectIndex;
+                    }).map(q => ({
+                        question: String(q.question || ''),
+                        options: Array.isArray(q.options) ? q.options.map(opt => String(opt || '')) : [],
+                        correctOptionIndex: Number(q.correctOptionIndex) || 0
+                    }));
+                } catch (error) {
+                    console.error("Failed to parse JSON data:", error);
+                    console.error("Raw data was:", jsonData);
+                    return [];
+                }
+            }
+
+            function shuffleArray(array) {
+                for (let i = array.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [array[i], array[j]] = [array[j], array[i]];
+                }
+                return array;
+            }
+            
+            function setupQuiz() {
+                // Read data from the "data island"
+                const rawDataElement = document.getElementById('quiz-data');
+                const rawData = rawDataElement ? rawDataElement.textContent : '';
+
+                console.log("=== 原始数据 ===");
+                console.log("原始数据长度:", rawData.length);
+                console.log("原始数据前500字符:", rawData.slice(0, 500));
+
+                questions = parseQuizData(rawData);
+                console.log("=== 解析后数据 ===");
+                console.log("题目数量:", questions.length);
+                questions.forEach((q, i) => {
+                    console.log(`题目${i+1}:`, q.question ? q.question.slice(0, 200) : "无内容");
+                });
+
+                if (questions.length === 0) {
+                    questionText.textContent = '没有加载到有效的题目数据，请检查生成的文件。_o(TヘTo)';
+                    return;
+                }
+                shuffledIndices = Array.from(Array(questions.length).keys());
+                if (questionOrderMode === 'random') {
+                    shuffleArray(shuffledIndices);
+                }
+                resetUserProgress();
+                createNavButtons();
+                displayQuestion(currentQuestionIndex);
+            }
+            
+            function resetUserProgress() {
+                currentQuestionIndex = 0;
+                userProgress = Array(questions.length).fill(null).map(() => ({
+                    selectedOption: null,
+                    isCorrect: null
+                }));
+            }
+
+            function displayQuestion(index) {
+                const actualIndex = shuffledIndices[index];
+                const question = questions[actualIndex];
+                const progress = userProgress[actualIndex];
+
+                progressText.textContent = `题目 ${index + 1} / ${questions.length}`;
+                
+                // 显示完整题目内容，确保C语言代码完整
+                questionText.textContent = question.question;
+                
+                // 调试输出
+                console.log(`显示题目 ${index + 1}:`, question.question.slice(0, 100));
+
+                optionsContainer.innerHTML = '';
+                question.options.forEach((option, optionIndex) => {
+                    const button = document.createElement('button');
+                    button.textContent = `${String.fromCharCode(65 + optionIndex)}. ${option}`;
+                    button.dataset.optionIndex = optionIndex;
+                    button.className = 'w-full text-left p-4 rounded-lg border border-gray-300 hover:bg-gray-100 transition-colors duration-200 whitespace-pre-wrap text-sm font-mono';
+                    
+                    if(progress.selectedOption !== null){
+                        button.disabled = true;
+                        if(optionIndex === question.correctOptionIndex){
+                            button.classList.add('bg-green-200', 'border-green-400');
+                        }
+                        if(optionIndex === progress.selectedOption && !progress.isCorrect){
+                             button.classList.add('bg-red-200', 'border-red-400');
+                        }
+                    }
+
+                    button.addEventListener('click', () => handleOptionSelect(optionIndex));
+                    optionsContainer.appendChild(button);
+                });
+                
+                updateNavBar(index);
+                updateNavButtonsState(index);
+            }
+            
+            function handleOptionSelect(selectedIndex) {
+                const actualIndex = shuffledIndices[currentQuestionIndex];
+                if (userProgress[actualIndex].selectedOption !== null) return;
+                
+                const question = questions[actualIndex];
+                const isCorrect = selectedIndex === question.correctOptionIndex;
+
+                userProgress[actualIndex] = { selectedOption: selectedIndex, isCorrect: isCorrect };
+                
+                const navBtn = document.querySelector(`.nav-btn[data-index='${currentQuestionIndex}']`);
+                navBtn.classList.remove('bg-gray-200', 'hover:bg-gray-300');
+                navBtn.classList.add(isCorrect ? 'bg-green-500' : 'bg-red-500', 'text-white');
+
+                Array.from(optionsContainer.children).forEach((button) => {
+                    button.disabled = true;
+                    const optIdx = parseInt(button.dataset.optionIndex, 10);
+                    if (optIdx === question.correctOptionIndex) {
+                        button.className = 'w-full text-left p-4 rounded-lg border border-green-500 bg-green-200';
+                    }
+                    if (optIdx === selectedIndex && !isCorrect) {
+                         button.className = 'w-full text-left p-4 rounded-lg border border-red-500 bg-red-200';
+                    }
+                });
+            }
+
+            function createNavButtons() {
+                navBar.innerHTML = '';
+                for (let i = 0; i < questions.length; i++) {
+                    const button = document.createElement('button');
+                    button.textContent = i + 1;
+                    button.dataset.index = i;
+                    button.className = 'nav-btn w-10 h-10 rounded-md bg-gray-200 hover:bg-gray-300 text-sm font-medium mx-1 transition-colors';
+                    button.addEventListener('click', () => {
+                        currentQuestionIndex = i;
+                        displayQuestion(currentQuestionIndex);
+                    });
+                    navBar.appendChild(button);
+                }
+            }
+
+            function updateNavBar(currentIndex) {
+                Array.from(navBar.children).forEach((btn, i) => {
+                    btn.classList.remove('bg-blue-500', 'text-white', 'ring-2', 'ring-blue-300');
+                    if (i === currentIndex) {
+                        btn.classList.add('bg-blue-500', 'text-white', 'ring-2', 'ring-blue-300');
+                        btn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+                    }
+                });
+            }
+            
+            function updateNavButtonsState(index) {
+                prevBtn.disabled = index === 0;
+                nextBtn.disabled = index === questions.length - 1;
+                prevBtn.classList.toggle('opacity-50', prevBtn.disabled);
+                nextBtn.classList.toggle('opacity-50', nextBtn.disabled);
+            }
+            
+            function showNextQuestion() {
+                if (currentQuestionIndex < questions.length - 1) {
+                    currentQuestionIndex++;
+                    displayQuestion(currentQuestionIndex);
+                }
+            }
+
+            function showPrevQuestion() {
+                if (currentQuestionIndex > 0) {
+                    currentQuestionIndex--;
+                    displayQuestion(currentQuestionIndex);
+                }
+            }
+            
+            function showResults() {
+                quizView.classList.add('opacity-0');
+                setTimeout(() => {
+                    quizView.classList.add('hidden');
+                    resultsView.classList.remove('hidden');
+                    resultsView.classList.remove('opacity-0');
+                }, 500);
+
+                const correctAnswers = userProgress.filter(p => p.isCorrect).length;
+                const totalQuestions = questions.length;
+                const percentage = totalQuestions > 0 ? ((correctAnswers / totalQuestions) * 100).toFixed(0) : 0;
+                
+                scoreText.textContent = `答对题数: ${correctAnswers} / ${totalQuestions} (正确率 ${percentage}%)`;
+            }
+
+            function restartQuiz() {
+                resultsView.classList.add('opacity-0');
+                 setTimeout(() => {
+                    resultsView.classList.add('hidden');
+                    quizView.classList.remove('hidden');
+                    quizView.classList.remove('opacity-0');
+                }, 500);
+                
+                if (questionOrderMode === 'random') {
+                    shuffleArray(shuffledIndices);
+                }
+                resetUserProgress();
+                
+                Array.from(navBar.children).forEach(btn => {
+                    btn.className = 'nav-btn w-10 h-10 rounded-md bg-gray-200 hover:bg-gray-300 text-sm font-medium mx-1 transition-colors';
+                });
+                
+                displayQuestion(0);
+            }
+
+            nextBtn.addEventListener('click', showNextQuestion);
+            prevBtn.addEventListener('click', showPrevQuestion);
+            finishBtn.addEventListener('click', showResults);
+            restartBtn.addEventListener('click', restartQuiz);
+
+            setupQuiz();
+        });
+    </script>
+</body>
+</html>
