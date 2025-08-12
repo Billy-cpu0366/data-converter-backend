@@ -41,8 +41,20 @@ origins = [
     "http://127.0.0.1:3003",
     "http://127.0.0.1:3004",
     "https://data-converter-frontend.pages.dev",
+    "https://ab053bcb.data-converter-frontend.pages.dev",
     "https://mizhoudpdns.dpdns.org",
 ]
+
+# 动态添加 Cloudflare Pages 域名
+import re
+def is_allowed_origin(origin: str) -> bool:
+    """检查是否为允许的源"""
+    if origin in origins:
+        return True
+    # 允许所有 *.data-converter-frontend.pages.dev 子域名
+    if re.match(r'https://[a-z0-9]+\.data-converter-frontend\.pages\.dev$', origin):
+        return True
+    return False
 
 app.add_middleware(
     CORSMiddleware,
